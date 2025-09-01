@@ -179,7 +179,7 @@ class BigBasketAutomation:
         """Process Gmail attachment download workflow"""
         try:
             status_text.text("Starting Gmail workflow...")
-            self._log_message("Starting Gmail workflow...")
+            self._log_message("Starting Gmail workflow...", log_container)
             
             # Search for emails
             emails = self.search_emails(
@@ -190,10 +190,10 @@ class BigBasketAutomation:
             )
             
             progress_bar.progress(progress_base + 0.25 * progress_scale)
-            self._log_message(f"Gmail search completed. Found {len(emails)} emails")
+            self._log_message(f"Gmail search completed. Found {len(emails)} emails", log_container)
             
             if not emails:
-                self._log_message("No emails found matching criteria")
+                self._log_message("No emails found matching criteria", log_container)
                 return {'success': True, 'processed': 0}
             
             status_text.text(f"Found {len(emails)} emails. Processing attachments...")
@@ -204,7 +204,7 @@ class BigBasketAutomation:
             
             if not base_folder_id:
                 error_msg = "Failed to create base folder in Google Drive"
-                self._log_message(f"ERROR: {error_msg}")
+                self._log_message(f"ERROR: {error_msg}", log_container)
                 st.error(error_msg)
                 return {'success': False, 'processed': 0}
             
@@ -222,7 +222,7 @@ class BigBasketAutomation:
                     subject = email_details.get('subject', 'No Subject')[:50]
                     sender = email_details.get('sender', 'Unknown')
                     
-                    self._log_message(f"Processing email: {subject} from {sender}")
+                    self._log_message(f"Processing email: {subject} from {sender}", log_container)
                     
                     # Get full message
                     message = self.gmail_service.users().messages().get(
@@ -240,25 +240,25 @@ class BigBasketAutomation:
                     total_attachments += attachment_count
                     if attachment_count > 0:
                         processed_count += 1
-                        self._log_message(f"Found {attachment_count} attachments in: {subject}")
+                        self._log_message(f"Found {attachment_count} attachments in: {subject}", log_container)
                     
                     progress = 0.50 + (i + 1) / len(emails) * 0.45
                     progress_bar.progress(progress_base + progress * progress_scale)
                     
                 except Exception as e:
                     error_msg = f"Failed to process email {email.get('id', 'unknown')}: {str(e)}"
-                    self._log_message(f"ERROR: {error_msg}")
+                    self._log_message(f"ERROR: {error_msg}", log_container)
             
             progress_bar.progress(progress_base + 1.00 * progress_scale)
             final_msg = f"Gmail workflow completed! Processed {total_attachments} attachments from {processed_count} emails"
             status_text.text(final_msg)
-            self._log_message(f"SUCCESS: {final_msg}")
+            self._log_message(f"SUCCESS: {final_msg}", log_container)
             
             return {'success': True, 'processed': total_attachments}
             
         except Exception as e:
             error_msg = f"Gmail workflow failed: {str(e)}"
-            self._log_message(f"ERROR: {error_msg}")
+            self._log_message(f"ERROR: {error_msg}", log_container)
             st.error(error_msg)
             return {'success': False, 'processed': 0}
     
@@ -266,123 +266,92 @@ class BigBasketAutomation:
         """Process Excel GRN workflow from Drive files"""
         try:
             status_text.text("Starting Excel GRN workflow...")
-            self._log_message("Starting Excel GRN workflow...")
+            self._log_message("Starting Excel GRN workflow...", log_container)
             
             # Get Excel files from Drive folder
             excel_files = self._get_excel_files(config['excel_folder_id'], config['max_results'])
             
             progress_bar.progress(progress_base + 0.25 * progress_scale)
-            self._log_message(f"Found {len(excel_files)} Excel files")
+            self._log_message(f"Found {len(excel_files)} Excel files", log_container)
             
             if not excel_files:
                 msg = "No Excel files found in the specified folder"
-                self._log_message(msg)
+                self._log_message(msg, log_container)
                 return {'success': True, 'processed': 0}
             
             status_text.text(f"Found {len(excel_files)} Excel files. Processing...")
             
-            # Read existing sheet data
-            result = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=config['spreadsheet_id'],
-                range=f"{config['sheet_name']}!A:ZZ"
-            ).execute()
-            values = result.get('values', [])
-            
-            if values:
-                headers = values[0]
-                rows = values[1:]
-                df_existing = pd.DataFrame(rows, columns=headers)
-                df_existing = self._clean_dataframe(df_existing)
-                if "Item Code" in df_existing.columns and "po_number" in df_existing.columns:
-                    existing_keys = set(zip(df_existing["Item Code"], df_existing["po_number"]))
-                else:
-                    existing_keys = set()
-                    self._log_message("Warning: 'Item Code' or 'po_number' columns not found in existing sheet")
-            else:
-                df_existing = pd.DataFrame()
-                existing_keys = set()
-            
-            sheet_has_headers = not df_existing.empty
+            sheet_has_headers = self._check_sheet_headers(config['spreadsheet_id'], config['sheet_name'])
             is_first_append = True
             processed_count = 0
             
             for i, file in enumerate(excel_files):
                 try:
                     status_text.text(f"Processing Excel file {i+1}/{len(excel_files)}: {file['name']}")
-                    self._log_message(f"Processing: {file['name']}")
+                    self._log_message(f"Processing: {file['name']}", log_container)
                     
                     # Read Excel file with robust parsing
                     df = self._read_excel_file_robust(file['id'], file['name'], config['header_row'], log_container)
                     
                     if df.empty:
-                        self._log_message(f"SKIPPED - No data extracted from {file['name']}")
+                        self._log_message(f"SKIPPED - No data extracted from {file['name']}", log_container)
                         continue
                     
                     df = self._clean_dataframe(df)
                     
-                    if "Item Code" not in df.columns or "po_number" not in df.columns:
-                        self._log_message(f"SKIPPED - Missing key columns in {file['name']}")
+                    if df.empty:
                         continue
                     
-                    # Dedup within new data
-                    df = df.drop_duplicates(subset=["Item Code", "po_number"], keep="first")
+                    self._log_message(f"Data shape: {df.shape} - Columns: {list(df.columns)[:3]}{'...' if len(df.columns) > 3 else ''}", log_container)
                     
-                    # Filter out existing duplicates
-                    new_keys = list(zip(df["Item Code"], df["po_number"]))
-                    mask = [key not in existing_keys for key in new_keys]
-                    df_unique = df.iloc[mask]
+                    # Internal dedup if keys present
+                    if "Skucode" in df.columns and "PoNo" in df.columns:
+                        df = df.drop_duplicates(subset=["Skucode", "PoNo"], keep="first")
                     
-                    if df_unique.empty:
-                        self._log_message(f"SKIPPED - No new unique data in {file['name']}")
+                    if df.empty:
                         continue
-                    
-                    self._log_message(f"Data shape: {df_unique.shape} - Columns: {list(df_unique.columns)[:3]}{'...' if len(df_unique.columns) > 3 else ''}")
                     
                     # Append to Google Sheet
                     append_headers = is_first_append and not sheet_has_headers
                     self._append_to_sheet(
                         config['spreadsheet_id'], 
                         config['sheet_name'], 
-                        df_unique, 
+                        df, 
                         append_headers,
                         log_container
                     )
                     
-                    # Update existing keys
-                    added_keys = set(zip(df_unique["Item Code"], df_unique["po_number"]))
-                    existing_keys.update(added_keys)
-                    
-                    self._log_message(f"APPENDED {len(df_unique)} unique rows from {file['name']}")
+                    self._log_message(f"APPENDED {len(df)} rows from {file['name']}", log_container)
                     processed_count += 1
                     is_first_append = False
                     sheet_has_headers = True
                     
-                    progress = 0.25 + (i + 1) / len(excel_files) * 0.75
+                    progress = 0.25 + (i + 1) / len(excel_files) * 0.70
                     progress_bar.progress(progress_base + progress * progress_scale)
                     
                 except Exception as e:
                     error_msg = f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}"
-                    self._log_message(f"ERROR: {error_msg}")
+                    self._log_message(f"ERROR: {error_msg}", log_container)
             
-            # Remove duplicates and clean sheet
             if processed_count > 0:
-                status_text.text("Removing duplicates from Google Sheet...")
-                self._log_message("Removing duplicates from Google Sheet...")
+                status_text.text("Cleaning and organizing Google Sheet...")
+                self._log_message("Cleaning and organizing Google Sheet...", log_container)
                 self._remove_duplicates_from_sheet(
                     config['spreadsheet_id'], 
-                    config['sheet_name']
+                    config['sheet_name'],
+                    log_container
                 )
             
             progress_bar.progress(progress_base + 1.00 * progress_scale)
             final_msg = f"Excel workflow completed! Processed {processed_count} files"
             status_text.text(final_msg)
-            self._log_message(f"SUCCESS: {final_msg}")
+            self._log_message(f"SUCCESS: {final_msg}", log_container)
             
             return {'success': True, 'processed': processed_count}
             
         except Exception as e:
             error_msg = f"Excel workflow failed: {str(e)}"
-            self._log_message(f"ERROR: {error_msg}")
+            self._log_message(f"ERROR: {error_msg}", log_container)
             st.error(error_msg)
             return {'success': False, 'processed': 0}
     
@@ -520,11 +489,11 @@ class BigBasketAutomation:
                     fields='id'
                 ).execute()
                 
-                self._log_message(f"Uploaded Excel file: {filename}")
+                self._log_message(f"Uploaded Excel file: {filename}", log_container)
                 processed_count += 1
                 
             except Exception as e:
-                self._log_message(f"ERROR processing attachment {filename}: {str(e)}")
+                self._log_message(f"ERROR processing attachment {filename}: {str(e)}", log_container)
         
         return processed_count
     
@@ -561,7 +530,7 @@ class BigBasketAutomation:
                 status, done = downloader.next_chunk()
             
             file_stream.seek(0)
-            self._log_message(f"Attempting to read {filename} (size: {len(file_stream.getvalue())} bytes)")
+            self._log_message(f"Attempting to read {filename} (size: {len(file_stream.getvalue())} bytes)", log_container)
             
             # Try openpyxl first
             try:
@@ -571,10 +540,10 @@ class BigBasketAutomation:
                 else:
                     df = pd.read_excel(file_stream, engine="openpyxl", header=header_row)
                 if not df.empty:
-                    self._log_message("SUCCESS with openpyxl")
+                    self._log_message("SUCCESS with openpyxl", log_container)
                     return self._clean_dataframe(df)
             except Exception as e:
-                self._log_message(f"openpyxl failed: {str(e)[:50]}...")
+                self._log_message(f"openpyxl failed: {str(e)[:50]}...", log_container)
             
             # Try xlrd for older files
             if filename.lower().endswith('.xls'):
@@ -585,22 +554,22 @@ class BigBasketAutomation:
                     else:
                         df = pd.read_excel(file_stream, engine="xlrd", header=header_row)
                     if not df.empty:
-                        self._log_message("SUCCESS with xlrd")
+                        self._log_message("SUCCESS with xlrd", log_container)
                         return self._clean_dataframe(df)
                 except Exception as e:
-                    self._log_message(f"xlrd failed: {str(e)[:50]}...")
+                    self._log_message(f"xlrd failed: {str(e)[:50]}...", log_container)
             
             # Try raw XML extraction
             df = self._try_raw_xml_extraction(file_stream, header_row, log_container)
             if not df.empty:
-                self._log_message("SUCCESS with raw XML extraction")
+                self._log_message("SUCCESS with raw XML extraction", log_container)
                 return self._clean_dataframe(df)
             
-            self._log_message(f"FAILED - All strategies failed for {filename}")
+            self._log_message(f"FAILED - All strategies failed for {filename}", log_container)
             return pd.DataFrame()
             
         except Exception as e:
-            self._log_message(f"ERROR reading {filename}: {str(e)}")
+            self._log_message(f"ERROR reading {filename}: {str(e)}", log_container)
             return pd.DataFrame()
     
     def _try_raw_xml_extraction(self, file_stream: io.BytesIO, header_row: int, log_container) -> pd.DataFrame:
@@ -690,16 +659,15 @@ class BigBasketAutomation:
     
     def _clean_cell_value(self, value):
         """Clean and standardize cell values, preserving numbers"""
-        if value is None or value == "":
+        if value is None:
             return None
         value = str(value).strip().replace("'", "")
-        if value == "":
-            return None
         try:
             if '.' in value or 'e' in value.lower():
                 return float(value)
-            return int(value)
-        except (ValueError, TypeError):
+            else:
+                return int(value)
+        except ValueError:
             return value
     
     def _clean_dataframe(self, df):
@@ -707,10 +675,10 @@ class BigBasketAutomation:
         if df.empty:
             return df
         
-        # Remove single quotes from string columns
+        # Remove single quotes and strip from string columns
         string_columns = df.select_dtypes(include=['object']).columns
         for col in string_columns:
-            df[col] = df[col].astype(str).str.replace("'", "", regex=False)
+            df[col] = df[col].astype(str).str.strip().str.replace("'", "", regex=False)
         
         # Remove rows where second column is blank
         if len(df.columns) >= 2:
@@ -729,30 +697,36 @@ class BigBasketAutomation:
         
         return df
     
+    def _check_sheet_headers(self, spreadsheet_id: str, sheet_name: str) -> bool:
+        """Check if Google Sheet already has headers"""
+        try:
+            result = self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!A1"
+            ).execute()
+            return bool(result.get('values', []))
+        except:
+            return False
+    
     def _append_to_sheet(self, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame, append_headers: bool, log_container):
         """Append DataFrame to Google Sheet, preserving number types"""
         try:
             # Prepare values with proper types
             def process_value(v):
-                if pd.isna(v) or v is None:
+                if math.isnan(v) if isinstance(v, float) else pd.isna(v):
                     return ''
                 if isinstance(v, (int, float)):
                     return v
-                return str(v)
+                return str(v) if v is not None else ''
             
             values = []
             if append_headers:
-                values.append([str(col) for col in df.columns])  # Headers as strings
+                values.append([str(col) for col in df.columns])
             
-            # Convert DataFrame rows to lists, preserving numeric types
-            for row in df.itertuples(index=False):
-                processed_row = []
-                for cell in row:
-                    processed_row.append(process_value(cell))
-                values.append(processed_row)
+            data_rows = [[process_value(cell) for cell in row] for row in df.itertuples(index=False)]
+            values += data_rows
             
             if not values:
-                self._log_message("No data to append to Google Sheet")
                 return
             
             # Find the next empty row
@@ -771,90 +745,91 @@ class BigBasketAutomation:
                 body={"values": values}
             ).execute()
             
-            self._log_message(f"Appended {len(values)} rows to Google Sheet")
+            self._log_message(f"Appended {len(values)} rows to Google Sheet", log_container)
             
         except Exception as e:
-            self._log_message(f"ERROR appending to sheet: {str(e)}")
+            self._log_message(f"ERROR appending to sheet: {str(e)}", log_container)
             raise
     
     def _remove_duplicates_from_sheet(self, spreadsheet_id: str, sheet_name: str):
-        """Remove duplicates based on Item Code and po_number, clean blanks, and sort"""
-        try:
-            result = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=spreadsheet_id,
-                range=f"{sheet_name}!A1:ZZ"
-            ).execute()
-            values = result.get('values', [])
-            
-            if not values:
-                self._log_message("Sheet is empty, skipping cleaning")
-                return
-            
-            # Pad all rows to max length
-            max_len = max(len(row) for row in values)
-            for row in values:
-                row.extend([''] * (max_len - len(row)))
-            
-            # Create headers
-            headers = [values[0][i] if values[0][i] else f"Column_{i+1}" for i in range(max_len)]
-            
-            rows = values[1:]
-            df = pd.DataFrame(rows, columns=headers)
-            before = len(df)
-            
-            if "Item Code" in df.columns and "po_number" in df.columns:
-                df = df.drop_duplicates(subset=["Item Code", "po_number"], keep="first")
-            
-            after_dup = len(df)
-            removed_dup = before - after_dup
-            
-            # Clean blanks
-            df.replace('', pd.NA, inplace=True)
-            df.dropna(how='all', inplace=True)  # blank rows
-            df.dropna(how='all', axis=1, inplace=True)  # blank columns
-            df.fillna('', inplace=True)
-            
-            after_clean = len(df)
-            removed_clean = after_dup - after_clean
-            
-            # Sort if po_number present
-            if "po_number" in df.columns:
-                df = df.sort_values(by="po_number", ascending=True)
-            
-            # Prepare data for update, preserving numeric types
-            def process_value(v):
-                if pd.isna(v) or v == '':
-                    return ''
-                try:
-                    if '.' in str(v) or 'e' in str(v).lower():
-                        return float(v)
-                    return int(v)
-                except (ValueError, TypeError):
-                    return str(v)
-            
-            values = []
-            values.append([str(col) for col in df.columns])  # Headers as strings
-            for row in df.itertuples(index=False):
-                values.append([process_value(cell) for cell in row])
-            
-            # Update sheet
-            self.sheets_service.spreadsheets().values().clear(
-                spreadsheetId=spreadsheet_id,
-                range=sheet_name
-            ).execute()
-            
-            body = {"values": values}
-            self.sheets_service.spreadsheets().values().update(
-                spreadsheetId=spreadsheet_id,
-                range=f"{sheet_name}!A1",
-                valueInputOption="RAW",
-                body=body
-            ).execute()
-            
-            self._log_message(f"Cleaned sheet: removed {removed_dup} duplicates and {removed_clean} blank rows")
+            """Remove duplicates based on Skucode and PoNo, clean blanks, and sort"""
+            try:
+                result = self.sheets_service.spreadsheets().values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"{sheet_name}!A1:ZZ"
+                ).execute()
+                values = result.get('values', [])
                 
-        except Exception as e:
-            self._log_message(f"ERROR cleaning sheet: {str(e)}")
+                if not values:
+                    self._log_message("Sheet is empty, skipping cleaning")
+                    return
+                
+                # Pad all rows to max length
+                max_len = max(len(row) for row in values)
+                for row in values:
+                    row.extend([''] * (max_len - len(row)))
+                
+                # Create headers
+                headers = [values[0][i] if values[0][i] else f"Column_{i+1}" for i in range(max_len)]
+                
+                rows = values[1:]
+                df = pd.DataFrame(rows, columns=headers)
+                before = len(df)
+                
+                if "Skucode" in df.columns and "PoNo" in df.columns:
+                    df = df.drop_duplicates(subset=["Skucode", "PoNo"], keep="first")
+                
+                after_dup = len(df)
+                removed_dup = before - after_dup
+                
+                # Clean blanks
+                df.replace('', pd.NA, inplace=True)
+                df.dropna(how='all', inplace=True)  # blank rows
+                df.dropna(how='all', axis=1, inplace=True)  # blank columns
+                df.fillna('', inplace=True)
+                
+                after_clean = len(df)
+                removed_clean = after_dup - after_clean
+                
+                # Sort if PoNo present
+                if "PoNo" in df.columns:
+                    df = df.sort_values(by="PoNo", ascending=True)
+                
+                # Prepare data for update, preserving numeric types
+                def process_value(v):
+                    if pd.isna(v) or v == '':
+                        return ''
+                    try:
+                        if '.' in str(v) or 'e' in str(v).lower():
+                            return float(v)
+                        return int(v)
+                    except (ValueError, TypeError):
+                        return str(v)
+                
+                values = []
+                values.append([str(col) for col in df.columns])  # Headers as strings
+                for row in df.itertuples(index=False):
+                    values.append([process_value(cell) for cell in row])
+                
+                # Update sheet
+                self.sheets_service.spreadsheets().values().clear(
+                    spreadsheetId=spreadsheet_id,
+                    range=sheet_name
+                ).execute()
+                
+                body = {"values": values}
+                self.sheets_service.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"{sheet_name}!A1",
+                    valueInputOption="RAW",
+                    body=body
+                ).execute()
+                
+                self._log_message(f"Cleaned sheet: removed {removed_dup} duplicates and {removed_clean} blank rows")
+                    
+            except Exception as e:
+                self._log_message(f"ERROR cleaning sheet: {str(e)}")
+
 
 def create_streamlit_ui():
     """Create the Streamlit user interface"""
@@ -940,7 +915,7 @@ Gmail Drive Folder: 1l5L9IdQ8WcV6AZ04JCeuyxvbNkLPJnHt
 Excel Source Folder: 1fdio9_h28UleeRjgRnWF32S8kg_fgWbs
 Target Spreadsheet: 170WUaPhkuxCezywEqZXJtHRw3my3rpjB9lJOvfLTeKM
 Sheet Name: bbalertgrn_2
-Duplicate Check: Based on Item Code + po_number
+Duplicate Check: Based on Skucode + PoNo
         """)
     
     # Hardcoded configurations
@@ -1109,8 +1084,8 @@ Duplicate Check: Based on Item Code + po_number
         **Drive to Sheets:**
         - Processes Excel files from source folder
         - Extracts data robustly
-        - Appends only unique rows (based on Item Code + po_number)
-        - Preserves number types
+        - Appends all data, handles extra columns
+        - At end, removes duplicates (Skucode + PoNo), cleans blanks, sorts by PoNo
         
         ### Troubleshooting
         
