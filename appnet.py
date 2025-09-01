@@ -262,98 +262,91 @@ class BigBasketAutomation:
             st.error(error_msg)
             return {'success': False, 'processed': 0}
     
-    def process_excel_workflow(self, config: dict, progress_bar, status_text, log_container, progress_base=0.0, progress_scale=1.0):
-        """Process Excel GRN workflow from Drive files"""
-        try:
-            status_text.text("Starting Excel GRN workflow...")
-            self._log_message("Starting Excel GRN workflow...", log_container)
-            
-            # Get Excel files from Drive folder
-            excel_files = self._get_excel_files(config['excel_folder_id'], config['max_results'])
-            
-            progress_bar.progress(progress_base + 0.25 * progress_scale)
-            self._log_message(f"Found {len(excel_files)} Excel files", log_container)
-            
-            if not excel_files:
-                msg = "No Excel files found in the specified folder"
-                self._log_message(msg, log_container)
-                return {'success': True, 'processed': 0}
-            
-            status_text.text(f"Found {len(excel_files)} Excel files. Processing...")
-            
-            sheet_has_headers = self._check_sheet_headers(config['spreadsheet_id'], config['sheet_name'])
-            is_first_append = True
-            processed_count = 0
-            
-            for i, file in enumerate(excel_files):
-                try:
-                    status_text.text(f"Processing Excel file {i+1}/{len(excel_files)}: {file['name']}")
-                    self._log_message(f"Processing: {file['name']}", log_container)
-                    
-                    # Read Excel file with robust parsing
-                    df = self._read_excel_file_robust(file['id'], file['name'], config['header_row'], log_container)
-                    
-                    if df.empty:
-                        self._log_message(f"SKIPPED - No data extracted from {file['name']}", log_container)
-                        continue
-                    
-                    df = self._clean_dataframe(df)
-                    
-                    if df.empty:
-                        continue
-                    
-                    self._log_message(f"Data shape: {df.shape} - Columns: {list(df.columns)[:3]}{'...' if len(df.columns) > 3 else ''}", log_container)
-                    
-                    # Internal dedup if keys present
-                    if "Skucode" in df.columns and "PoNo" in df.columns:
-                        df = df.drop_duplicates(subset=["Skucode", "PoNo"], keep="first")
-                    
-                    if df.empty:
-                        continue
-                    
-                    # Append to Google Sheet
-                    append_headers = is_first_append and not sheet_has_headers
-                    self._append_to_sheet(
-                        config['spreadsheet_id'], 
-                        config['sheet_name'], 
-                        df, 
-                        append_headers,
-                        log_container
-                    )
-                    
-                    self._log_message(f"APPENDED {len(df)} rows from {file['name']}", log_container)
-                    processed_count += 1
-                    is_first_append = False
-                    sheet_has_headers = True
-                    
-                    progress = 0.25 + (i + 1) / len(excel_files) * 0.70
-                    progress_bar.progress(progress_base + progress * progress_scale)
-                    
-                except Exception as e:
-                    error_msg = f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}"
-                    self._log_message(f"ERROR: {error_msg}", log_container)
-            
-            if processed_count > 0:
-                status_text.text("Cleaning and organizing Google Sheet...")
-                self._log_message("Cleaning and organizing Google Sheet...", log_container)
-                self._remove_duplicates_from_sheet(
-                    config['spreadsheet_id'], 
-                    config['sheet_name'],
-                    log_container
+    def process_excel_workflow(self, config: dict, progress_bar, status_text):
+            """Process Excel GRN workflow from Drive files"""
+            try:
+                status_text.text("Starting Excel GRN workflow...")
+                self._log_message("Starting Excel GRN workflow...")
+                
+                # Get Excel files from Drive folder with date filtering and limit
+                excel_files = self._get_excel_files_filtered(
+                    config['excel_folder_id'], 
+                    config['days_back'], 
+                    config['max_files']
                 )
-            
-            progress_bar.progress(progress_base + 1.00 * progress_scale)
-            final_msg = f"Excel workflow completed! Processed {processed_count} files"
-            status_text.text(final_msg)
-            self._log_message(f"SUCCESS: {final_msg}", log_container)
-            
-            return {'success': True, 'processed': processed_count}
-            
-        except Exception as e:
-            error_msg = f"Excel workflow failed: {str(e)}"
-            self._log_message(f"ERROR: {error_msg}", log_container)
-            st.error(error_msg)
-            return {'success': False, 'processed': 0}
+                
+                progress_bar.progress(25)
+                self._log_message(f"Found {len(excel_files)} Excel files (filtered by {config['days_back']} days, max {config['max_files']} files)")
+                
+                if not excel_files:
+                    msg = "No Excel files found in the specified folder within the date range"
+                    self._log_message(msg)
+                    return {'success': True, 'processed': 0}
+                
+                status_text.text(f"Found {len(excel_files)} Excel files. Processing...")
+                
+                processed_count = 0
+                is_first_file = True
+                
+                # Check if sheet already has headers
+                sheet_has_headers = self._check_sheet_headers(config['spreadsheet_id'], config['sheet_name'])
+                
+                for i, file in enumerate(excel_files):
+                    try:
+                        status_text.text(f"Processing Excel file {i+1}/{len(excel_files)}: {file['name']}")
+                        self._log_message(f"Processing: {file['name']}")
+                        
+                        # Read Excel file with robust parsing
+                        df = self._read_excel_file_robust(file['id'], file['name'], config['header_row'])
+                        
+                        if df.empty:
+                            self._log_message(f"SKIPPED - No data extracted from {file['name']}")
+                            continue
+                        
+                        self._log_message(f"Data shape: {df.shape} - Columns: {list(df.columns)[:3]}{'...' if len(df.columns) > 3 else ''}")
+                        
+                        # Append to Google Sheet
+                        append_headers = is_first_file and not sheet_has_headers
+                        self._append_to_sheet(
+                            config['spreadsheet_id'], 
+                            config['sheet_name'], 
+                            df, 
+                            append_headers
+                        )
+                        
+                        self._log_message(f"APPENDED to Google Sheet successfully: {file['name']}")
+                        processed_count += 1
+                        is_first_file = False
+                        sheet_has_headers = True
+                        
+                        progress = 25 + (i + 1) / len(excel_files) * 70
+                        progress_bar.progress(int(progress))
+                        
+                    except Exception as e:
+                        error_msg = f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}"
+                        self._log_message(f"ERROR: {error_msg}")
+                
+                # Remove duplicates
+                if processed_count > 0:
+                    status_text.text("Removing duplicates from Google Sheet...")
+                    self._log_message("Removing duplicates from Google Sheet...")
+                    self._remove_duplicates_from_sheet(
+                        config['spreadsheet_id'], 
+                        config['sheet_name']
+                    )
+                
+                progress_bar.progress(100)
+                final_msg = f"Excel workflow completed! Processed {processed_count} files"
+                status_text.text(final_msg)
+                self._log_message(f"SUCCESS: {final_msg}")
+                
+                return {'success': True, 'processed': processed_count}
+                
+            except Exception as e:
+                error_msg = f"Excel workflow failed: {str(e)}"
+                self._log_message(f"ERROR: {error_msg}")
+                st.error(error_msg)
+                return {'success': False, 'processed': 0}
     
     def _log_message(self, message: str, log_container=None):
         """Add timestamped message to log storage"""
@@ -752,84 +745,83 @@ class BigBasketAutomation:
             raise
     
     def _remove_duplicates_from_sheet(self, spreadsheet_id: str, sheet_name: str):
-            """Remove duplicates based on Skucode and PoNo, clean blanks, and sort"""
-            try:
-                result = self.sheets_service.spreadsheets().values().get(
-                    spreadsheetId=spreadsheet_id,
-                    range=f"{sheet_name}!A1:ZZ"
-                ).execute()
-                values = result.get('values', [])
+        """Remove duplicates based on Skucode and PoNo, clean blanks, and sort"""
+        try:
+            result = self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!A1:ZZ"
+            ).execute()
+            values = result.get('values', [])
+            
+            if not values:
+                self._log_message("Sheet is empty, skipping cleaning")
+                return
+            
+            # Pad all rows to max length
+            max_len = max(len(row) for row in values)
+            for row in values:
+                row.extend([''] * (max_len - len(row)))
+            
+            # Create headers
+            headers = [values[0][i] if values[0][i] else f"Column_{i+1}" for i in range(max_len)]
+            
+            rows = values[1:]
+            df = pd.DataFrame(rows, columns=headers)
+            before = len(df)
+            
+            if "Skucode" in df.columns and "PoNo" in df.columns:
+                df = df.drop_duplicates(subset=["Skucode", "PoNo"], keep="first")
+            
+            after_dup = len(df)
+            removed_dup = before - after_dup
+            
+            # Clean blanks
+            df.replace('', pd.NA, inplace=True)
+            df.dropna(how='all', inplace=True)  # blank rows
+            df.dropna(how='all', axis=1, inplace=True)  # blank columns
+            df.fillna('', inplace=True)
+            
+            after_clean = len(df)
+            removed_clean = after_dup - after_clean
+            
+            # Sort if PoNo present
+            if "PoNo" in df.columns:
+                df = df.sort_values(by="PoNo", ascending=True)
+            
+            # Prepare data for update, preserving numeric types
+            def process_value(v):
+                if pd.isna(v) or v == '':
+                    return ''
+                try:
+                    if '.' in str(v) or 'e' in str(v).lower():
+                        return float(v)
+                    return int(v)
+                except (ValueError, TypeError):
+                    return str(v)
+            
+            values = []
+            values.append([str(col) for col in df.columns])  # Headers as strings
+            for row in df.itertuples(index=False):
+                values.append([process_value(cell) for cell in row])
+            
+            # Update sheet
+            self.sheets_service.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=sheet_name
+            ).execute()
+            
+            body = {"values": values}
+            self.sheets_service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!A1",
+                valueInputOption="RAW",
+                body=body
+            ).execute()
+            
+            self._log_message(f"Cleaned sheet: removed {removed_dup} duplicates and {removed_clean} blank rows")
                 
-                if not values:
-                    self._log_message("Sheet is empty, skipping cleaning")
-                    return
-                
-                # Pad all rows to max length
-                max_len = max(len(row) for row in values)
-                for row in values:
-                    row.extend([''] * (max_len - len(row)))
-                
-                # Create headers
-                headers = [values[0][i] if values[0][i] else f"Column_{i+1}" for i in range(max_len)]
-                
-                rows = values[1:]
-                df = pd.DataFrame(rows, columns=headers)
-                before = len(df)
-                
-                if "Skucode" in df.columns and "PoNo" in df.columns:
-                    df = df.drop_duplicates(subset=["Skucode", "PoNo"], keep="first")
-                
-                after_dup = len(df)
-                removed_dup = before - after_dup
-                
-                # Clean blanks
-                df.replace('', pd.NA, inplace=True)
-                df.dropna(how='all', inplace=True)  # blank rows
-                df.dropna(how='all', axis=1, inplace=True)  # blank columns
-                df.fillna('', inplace=True)
-                
-                after_clean = len(df)
-                removed_clean = after_dup - after_clean
-                
-                # Sort if PoNo present
-                if "PoNo" in df.columns:
-                    df = df.sort_values(by="PoNo", ascending=True)
-                
-                # Prepare data for update, preserving numeric types
-                def process_value(v):
-                    if pd.isna(v) or v == '':
-                        return ''
-                    try:
-                        if '.' in str(v) or 'e' in str(v).lower():
-                            return float(v)
-                        return int(v)
-                    except (ValueError, TypeError):
-                        return str(v)
-                
-                values = []
-                values.append([str(col) for col in df.columns])  # Headers as strings
-                for row in df.itertuples(index=False):
-                    values.append([process_value(cell) for cell in row])
-                
-                # Update sheet
-                self.sheets_service.spreadsheets().values().clear(
-                    spreadsheetId=spreadsheet_id,
-                    range=sheet_name
-                ).execute()
-                
-                body = {"values": values}
-                self.sheets_service.spreadsheets().values().update(
-                    spreadsheetId=spreadsheet_id,
-                    range=f"{sheet_name}!A1",
-                    valueInputOption="RAW",
-                    body=body
-                ).execute()
-                
-                self._log_message(f"Cleaned sheet: removed {removed_dup} duplicates and {removed_clean} blank rows")
-                    
-            except Exception as e:
-                self._log_message(f"ERROR cleaning sheet: {str(e)}")
-
+        except Exception as e:
+            self._log_message(f"ERROR cleaning sheet: {str(e)}")
 
 def create_streamlit_ui():
     """Create the Streamlit user interface"""
@@ -1105,3 +1097,4 @@ Duplicate Check: Based on Skucode + PoNo
 
 if __name__ == "__main__":
     create_streamlit_ui()
+
