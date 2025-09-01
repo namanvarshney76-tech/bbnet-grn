@@ -242,8 +242,8 @@ class BigBasketAutomation:
                         processed_count += 1
                         self._log_message(f"Found {attachment_count} attachments in: {subject}", log_container)
                     
-                    progress = 0.50 + (i + 1) / len(emails) * 0.45
-                    progress_bar.progress(progress_base + progress * progress_scale)
+                    progress = progress_base + (0.50 + (i + 1) / len(emails) * 0.45) * progress_scale
+                    progress_bar.progress(progress)
                     
                 except Exception as e:
                     error_msg = f"Failed to process email {email.get('id', 'unknown')}: {str(e)}"
@@ -262,25 +262,25 @@ class BigBasketAutomation:
             st.error(error_msg)
             return {'success': False, 'processed': 0}
     
-    def process_excel_workflow(self, config: dict, progress_bar, status_text):
+    def process_excel_workflow(self, config: dict, progress_bar, status_text, log_container=None, progress_base=0.0, progress_scale=1.0):
             """Process Excel GRN workflow from Drive files"""
             try:
                 status_text.text("Starting Excel GRN workflow...")
-                self._log_message("Starting Excel GRN workflow...")
+                self._log_message("Starting Excel GRN workflow...", log_container)
                 
                 # Get Excel files from Drive folder with date filtering and limit
                 excel_files = self._get_excel_files_filtered(
                     config['excel_folder_id'], 
                     config['days_back'], 
-                    config['max_files']
+                    config['max_results']
                 )
                 
-                progress_bar.progress(25)
-                self._log_message(f"Found {len(excel_files)} Excel files (filtered by {config['days_back']} days, max {config['max_files']} files)")
+                progress_bar.progress(progress_base + 0.25 * progress_scale)
+                self._log_message(f"Found {len(excel_files)} Excel files (filtered by {config['days_back']} days, max {config['max_results']} files)", log_container)
                 
                 if not excel_files:
                     msg = "No Excel files found in the specified folder within the date range"
-                    self._log_message(msg)
+                    self._log_message(msg, log_container)
                     return {'success': True, 'processed': 0}
                 
                 status_text.text(f"Found {len(excel_files)} Excel files. Processing...")
@@ -294,16 +294,16 @@ class BigBasketAutomation:
                 for i, file in enumerate(excel_files):
                     try:
                         status_text.text(f"Processing Excel file {i+1}/{len(excel_files)}: {file['name']}")
-                        self._log_message(f"Processing: {file['name']}")
+                        self._log_message(f"Processing: {file['name']}", log_container)
                         
                         # Read Excel file with robust parsing
-                        df = self._read_excel_file_robust(file['id'], file['name'], config['header_row'])
+                        df = self._read_excel_file_robust(file['id'], file['name'], config['header_row'], log_container)
                         
                         if df.empty:
-                            self._log_message(f"SKIPPED - No data extracted from {file['name']}")
+                            self._log_message(f"SKIPPED - No data extracted from {file['name']}", log_container)
                             continue
                         
-                        self._log_message(f"Data shape: {df.shape} - Columns: {list(df.columns)[:3]}{'...' if len(df.columns) > 3 else ''}")
+                        self._log_message(f"Data shape: {df.shape} - Columns: {list(df.columns)[:3]}{'...' if len(df.columns) > 3 else ''}", log_container)
                         
                         # Append to Google Sheet
                         append_headers = is_first_file and not sheet_has_headers
@@ -311,40 +311,41 @@ class BigBasketAutomation:
                             config['spreadsheet_id'], 
                             config['sheet_name'], 
                             df, 
-                            append_headers
+                            append_headers,
+                            log_container
                         )
                         
-                        self._log_message(f"APPENDED to Google Sheet successfully: {file['name']}")
+                        self._log_message(f"APPENDED to Google Sheet successfully: {file['name']}", log_container)
                         processed_count += 1
                         is_first_file = False
                         sheet_has_headers = True
                         
-                        progress = 25 + (i + 1) / len(excel_files) * 70
-                        progress_bar.progress(int(progress))
+                        progress = progress_base + (0.25 + (i + 1) / len(excel_files) * 0.70) * progress_scale
+                        progress_bar.progress(progress)
                         
                     except Exception as e:
                         error_msg = f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}"
-                        self._log_message(f"ERROR: {error_msg}")
+                        self._log_message(f"ERROR: {error_msg}", log_container)
                 
                 # Remove duplicates
                 if processed_count > 0:
                     status_text.text("Removing duplicates from Google Sheet...")
-                    self._log_message("Removing duplicates from Google Sheet...")
+                    self._log_message("Removing duplicates from Google Sheet...", log_container)
                     self._remove_duplicates_from_sheet(
                         config['spreadsheet_id'], 
                         config['sheet_name']
                     )
                 
-                progress_bar.progress(100)
+                progress_bar.progress(progress_base + 1.00 * progress_scale)
                 final_msg = f"Excel workflow completed! Processed {processed_count} files"
                 status_text.text(final_msg)
-                self._log_message(f"SUCCESS: {final_msg}")
+                self._log_message(f"SUCCESS: {final_msg}", log_container)
                 
                 return {'success': True, 'processed': processed_count}
                 
             except Exception as e:
                 error_msg = f"Excel workflow failed: {str(e)}"
-                self._log_message(f"ERROR: {error_msg}")
+                self._log_message(f"ERROR: {error_msg}", log_container)
                 st.error(error_msg)
                 return {'success': False, 'processed': 0}
     
@@ -490,16 +491,19 @@ class BigBasketAutomation:
         
         return processed_count
     
-    def _get_excel_files(self, folder_id: str, max_results: int = 100) -> List[Dict]:
-        """Get Excel files from Drive folder"""
+    def _get_excel_files_filtered(self, folder_id: str, days_back: int, max_results: int) -> List[Dict]:
+        """Get Excel files from Drive folder with date filter"""
         try:
+            start_date = datetime.now(timezone.utc) - timedelta(days=days_back)
+            start_date_str = start_date.isoformat()
             query = (f"'{folder_id}' in parents and "
-                    f"(mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or "
-                    f"mimeType='application/vnd.ms-excel')")
+                     f"(mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or "
+                     f"mimeType='application/vnd.ms-excel') and "
+                     f"createdTime > '{start_date_str}'")
             
             results = self.drive_service.files().list(
                 q=query,
-                fields="files(id, name)",
+                fields="files(id, name, createdTime)",
                 orderBy='createdTime desc',
                 pageSize=max_results
             ).execute()
@@ -701,7 +705,7 @@ class BigBasketAutomation:
         except:
             return False
     
-    def _append_to_sheet(self, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame, append_headers: bool, log_container):
+    def _append_to_sheet(self, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame, append_headers: bool, log_container=None):
         """Append DataFrame to Google Sheet, preserving number types"""
         try:
             # Prepare values with proper types
@@ -924,6 +928,7 @@ Duplicate Check: Based on Skucode + PoNo
         'spreadsheet_id': '170WUaPhkuxCezywEqZXJtHRw3my3rpjB9lJOvfLTeKM',
         'sheet_name': 'bbalertgrn_2',
         'header_row': header_row,
+        'days_back': days_back,
         'max_results': max_results
     }
     
@@ -1097,4 +1102,3 @@ Duplicate Check: Based on Skucode + PoNo
 
 if __name__ == "__main__":
     create_streamlit_ui()
-
