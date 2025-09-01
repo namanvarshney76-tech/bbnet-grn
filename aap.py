@@ -95,7 +95,7 @@ class BigBasketAutomation:
                 flow = Flow.from_client_config(
                     client_config=creds_data,
                     scopes=combined_scopes,
-                    redirect_uri=st.secrets.get("google", {}).get("redirect_uri", "https://bbnet01.streamlit.app/")
+                    redirect_uri=st.secrets.get("google", {}).get("redirect_uri", "https://bbnet-auto-grn.streamlit.app/")
                 )
                 
                 # Generate authorization URL
@@ -281,28 +281,7 @@ class BigBasketAutomation:
             
             status_text.text(f"Found {len(excel_files)} Excel files. Processing...")
             
-            # Read existing sheet data
-            result = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=config['spreadsheet_id'],
-                range=f"{config['sheet_name']}!A:ZZ"
-            ).execute()
-            values = result.get('values', [])
-            
-            if values:
-                headers = values[0]
-                rows = values[1:]
-                df_existing = pd.DataFrame(rows, columns=headers)
-                df_existing = self._clean_dataframe(df_existing)
-                if "Item Code" in df_existing.columns and "po_number" in df_existing.columns:
-                    existing_keys = set(zip(df_existing["Item Code"], df_existing["po_number"]))
-                else:
-                    existing_keys = set()
-                    self._log_message("Warning: 'Item Code' or 'po_number' columns not found in existing sheet", log_container)
-            else:
-                df_existing = pd.DataFrame()
-                existing_keys = set()
-            
-            sheet_has_headers = not df_existing.empty
+            sheet_has_headers = self._check_sheet_headers(config['spreadsheet_id'], config['sheet_name'])
             is_first_append = True
             processed_count = 0
             
@@ -320,49 +299,48 @@ class BigBasketAutomation:
                     
                     df = self._clean_dataframe(df)
                     
-                    if "Item Code" not in df.columns or "po_number" not in df.columns:
-                        self._log_message(f"SKIPPED - Missing key columns in {file['name']}", log_container)
+                    if df.empty:
                         continue
                     
-                    # Dedup within new data
-                    df = df.drop_duplicates(subset=["Item Code", "po_number"], keep="first")
+                    self._log_message(f"Data shape: {df.shape} - Columns: {list(df.columns)[:3]}{'...' if len(df.columns) > 3 else ''}", log_container)
                     
-                    # Filter out existing duplicates
-                    new_keys = list(zip(df["Item Code"], df["po_number"]))
-                    mask = [key not in existing_keys for key in new_keys]
-                    df_unique = df.iloc[mask]
+                    # Internal dedup if keys present
+                    if "Item Code" in df.columns and "po_number" in df.columns:
+                        df = df.drop_duplicates(subset=["Item Code", "po_number"], keep="first")
                     
-                    if df_unique.empty:
-                        self._log_message(f"SKIPPED - No new unique data in {file['name']}", log_container)
+                    if df.empty:
                         continue
-                    
-                    self._log_message(f"Data shape: {df_unique.shape} - Columns: {list(df_unique.columns)[:3]}{'...' if len(df_unique.columns) > 3 else ''}", log_container)
                     
                     # Append to Google Sheet
                     append_headers = is_first_append and not sheet_has_headers
                     self._append_to_sheet(
                         config['spreadsheet_id'], 
                         config['sheet_name'], 
-                        df_unique, 
+                        df, 
                         append_headers,
                         log_container
                     )
                     
-                    # Update existing keys
-                    added_keys = set(zip(df_unique["Item Code"], df_unique["po_number"]))
-                    existing_keys.update(added_keys)
-                    
-                    self._log_message(f"APPENDED {len(df_unique)} unique rows from {file['name']}", log_container)
+                    self._log_message(f"APPENDED {len(df)} rows from {file['name']}", log_container)
                     processed_count += 1
                     is_first_append = False
                     sheet_has_headers = True
                     
-                    progress = 0.25 + (i + 1) / len(excel_files) * 0.75
+                    progress = 0.25 + (i + 1) / len(excel_files) * 0.70
                     progress_bar.progress(progress_base + progress * progress_scale)
                     
                 except Exception as e:
                     error_msg = f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}"
                     self._log_message(f"ERROR: {error_msg}", log_container)
+            
+            if processed_count > 0:
+                status_text.text("Cleaning and organizing Google Sheet...")
+                self._log_message("Cleaning and organizing Google Sheet...", log_container)
+                self._remove_duplicates_from_sheet(
+                    config['spreadsheet_id'], 
+                    config['sheet_name'],
+                    log_container
+                )
             
             progress_bar.progress(progress_base + 1.00 * progress_scale)
             final_msg = f"Excel workflow completed! Processed {processed_count} files"
@@ -697,10 +675,10 @@ class BigBasketAutomation:
         if df.empty:
             return df
         
-        # Remove single quotes from string columns
+        # Remove single quotes and strip from string columns
         string_columns = df.select_dtypes(include=['object']).columns
         for col in string_columns:
-            df[col] = df[col].astype(str).str.replace("'", "", regex=False)
+            df[col] = df[col].astype(str).str.strip().str.replace("'", "", regex=False)
         
         # Remove rows where second column is blank
         if len(df.columns) >= 2:
@@ -718,6 +696,17 @@ class BigBasketAutomation:
         duplicates_removed = original_count - len(df)
         
         return df
+    
+    def _check_sheet_headers(self, spreadsheet_id: str, sheet_name: str) -> bool:
+        """Check if Google Sheet already has headers"""
+        try:
+            result = self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!A1"
+            ).execute()
+            return bool(result.get('values', []))
+        except:
+            return False
     
     def _append_to_sheet(self, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame, append_headers: bool, log_container):
         """Append DataFrame to Google Sheet, preserving number types"""
@@ -761,6 +750,69 @@ class BigBasketAutomation:
         except Exception as e:
             self._log_message(f"ERROR appending to sheet: {str(e)}", log_container)
             raise
+    
+    def _remove_duplicates_from_sheet(self, spreadsheet_id: str, sheet_name: str, log_container):
+        """Remove duplicates based on Item Code and po_number, clean blanks, and sort"""
+        try:
+            result = self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!A1:ZZ"
+            ).execute()
+            values = result.get('values', [])
+            
+            if not values:
+                self._log_message("Sheet is empty, skipping cleaning", log_container)
+                return
+            
+            # Pad all rows to max length
+            max_len = max(len(row) for row in values)
+            for row in values:
+                row.extend([''] * (max_len - len(row)))
+            
+            # Create headers
+            headers = [values[0][i] if values[0][i] else f"Column_{i+1}" for i in range(max_len)]
+            
+            rows = values[1:]
+            df = pd.DataFrame(rows, columns=headers)
+            before = len(df)
+            
+            if "Item Code" in df.columns and "po_number" in df.columns:
+                df = df.drop_duplicates(subset=["Item Code", "po_number"], keep="first")
+            
+            after_dup = len(df)
+            removed_dup = before - after_dup
+            
+            # Clean blanks
+            df.replace('', pd.NA, inplace=True)
+            df.dropna(how='all', inplace=True)  # blank rows
+            df.dropna(how='all', axis=1, inplace=True)  # blank columns
+            df.fillna('', inplace=True)
+            
+            after_clean = len(df)
+            removed_clean = after_dup - after_clean
+            
+            # Sort if po_number present
+            if "po_number" in df.columns:
+                df = df.sort_values(by="po_number", ascending=True)
+            
+            # Update sheet
+            self.sheets_service.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=sheet_name
+            ).execute()
+            
+            body = {"values": [df.columns.tolist()] + df.values.tolist()}
+            self.sheets_service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_name}!A1",
+                valueInputOption="RAW",
+                body=body
+            ).execute()
+            
+            self._log_message(f"Cleaned sheet: removed {removed_dup} duplicates and {removed_clean} blank rows", log_container)
+                
+        except Exception as e:
+            self._log_message(f"ERROR cleaning sheet: {str(e)}", log_container)
 
 
 def create_streamlit_ui():
@@ -1016,8 +1068,8 @@ Duplicate Check: Based on Item Code + po_number
         **Drive to Sheets:**
         - Processes Excel files from source folder
         - Extracts data robustly
-        - Appends only unique rows (based on Item Code + po_number)
-        - Preserves number types
+        - Appends all data, handles extra columns
+        - At end, removes duplicates (Item Code + po_number), cleans blanks, sorts by po_number
         
         ### Troubleshooting
         
